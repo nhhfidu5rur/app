@@ -3,17 +3,14 @@ name: Build Android APK
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: ⬇️ Checkout Code
+      - name: ⬇️ Checkout
         uses: actions/checkout@v4
 
       - name: ☕ Setup Java 17
@@ -29,35 +26,251 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: 📋 Flutter Doctor
-        run: flutter doctor -v
+      - name: 🗑️ Delete Old Android Folder
+        run: rm -rf android/
+
+      - name: 🔄 Recreate Android Project
+        run: flutter create --platforms=android .
 
       - name: 📦 Get Dependencies
         run: flutter pub get
 
-      - name: 🧹 Clean
-        run: flutter clean
-
-      - name: 📦 Get Dependencies Again
-        run: flutter pub get
-
-      - name: 🏗️ Build APK
+      - name: 🔧 Fix MainActivity
         run: |
-          flutter build apk \
-            --release \
-            --no-obfuscate \
-            --no-shrink \
-            --no-tree-shake-icons
+          MAIN_PATH="android/app/src/main/kotlin/com/example/excel_manager/MainActivity.kt"
+          mkdir -p $(dirname $MAIN_PATH)
+          cat > $MAIN_PATH << 'EOF'
+          package com.example.excel_manager
+          
+          import io.flutter.embedding.android.FlutterActivity
+          
+          class MainActivity: FlutterActivity()
+          EOF
 
-      - name: ✅ Check APK exists
+      - name: 🔧 Fix AndroidManifest
+        run: |
+          cat > android/app/src/main/AndroidManifest.xml << 'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+                  android:maxSdkVersion="32"/>
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+                  android:maxSdkVersion="29"/>
+          
+              <application
+                  android:label="Excel Manager"
+                  android:name="${applicationName}"
+                  android:icon="@mipmap/ic_launcher"
+                  android:requestLegacyExternalStorage="true">
+          
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+          
+                      <meta-data
+                          android:name="io.flutter.embedding.android.NormalTheme"
+                          android:resource="@style/NormalTheme"/>
+          
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+          
+                  <provider
+                      android:name="androidx.core.content.FileProvider"
+                      android:authorities="${applicationId}.provider"
+                      android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data
+                          android:name="android.support.FILE_PROVIDER_PATHS"
+                          android:resource="@xml/provider_paths"/>
+                  </provider>
+          
+              </application>
+          </manifest>
+          EOF
+
+      - name: 🔧 Fix app build.gradle
+        run: |
+          cat > android/app/build.gradle << 'EOF'
+          plugins {
+              id "com.android.application"
+              id "kotlin-android"
+              id "dev.flutter.flutter-gradle-plugin"
+          }
+          
+          android {
+              namespace "com.example.excel_manager"
+              compileSdk 34
+              ndkVersion "25.1.8937393"
+          
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          
+              kotlinOptions {
+                  jvmTarget = '1.8'
+              }
+          
+              defaultConfig {
+                  applicationId "com.example.excel_manager"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0.0"
+                  multiDexEnabled true
+              }
+          
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.debug
+                      minifyEnabled false
+                      shrinkResources false
+                  }
+              }
+          }
+          
+          flutter {
+              source '../..'
+          }
+          
+          dependencies {
+              implementation 'androidx.multidex:multidex:2.0.1'
+          }
+          EOF
+
+      - name: 🔧 Fix root build.gradle
+        run: |
+          cat > android/build.gradle << 'EOF'
+          buildscript {
+              ext.kotlin_version = '1.9.22'
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.2.0'
+                  classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+              }
+          }
+          
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          
+          rootProject.buildDir = '../build'
+          subprojects {
+              project.buildDir = "${rootProject.buildDir}/${project.name}"
+          }
+          subprojects {
+              project.evaluationDependsOn(':app')
+          }
+          
+          tasks.register("clean", Delete) {
+              delete rootProject.buildDir
+          }
+          EOF
+
+      - name: 🔧 Fix gradle wrapper
+        run: |
+          cat > android/gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.4-bin.zip
+          EOF
+
+      - name: 🔧 Fix settings.gradle
+        run: |
+          cat > android/settings.gradle << 'EOF'
+          pluginManagement {
+              def flutterSdkPath = {
+                  def properties = new Properties()
+                  file("local.properties").withInputStream { properties.load(it) }
+                  def flutterSdkPath = properties.getProperty("flutter.sdk")
+                  assert flutterSdkPath != null, "flutter.sdk not set in local.properties"
+                  return flutterSdkPath
+              }()
+          
+              includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
+          
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          
+          plugins {
+              id "dev.flutter.flutter-gradle-plugin" version "1.0.0" apply false
+          }
+          
+          include ":app"
+          EOF
+
+      - name: 🔧 Create provider_paths.xml
+        run: |
+          mkdir -p android/app/src/main/res/xml
+          cat > android/app/src/main/res/xml/provider_paths.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths>
+              <external-path name="external_files" path="."/>
+              <cache-path name="cache" path="."/>
+              <files-path name="files" path="."/>
+          </paths>
+          EOF
+
+      - name: 🔧 Create styles.xml
+        run: |
+          mkdir -p android/app/src/main/res/values
+          cat > android/app/src/main/res/values/styles.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="LaunchTheme" parent="@android:style/Theme.Black.NoTitleBar">
+                  <item name="android:forceDarkAllowed">false</item>
+                  <item name="android:windowBackground">@drawable/launch_background</item>
+              </style>
+              <style name="NormalTheme" parent="@android:style/Theme.Black.NoTitleBar">
+                  <item name="android:forceDarkAllowed">false</item>
+                  <item name="android:windowBackground">?android:colorBackground</item>
+              </style>
+          </resources>
+          EOF
+
+      - name: 🔧 Create launch_background.xml
+        run: |
+          mkdir -p android/app/src/main/res/drawable
+          cat > android/app/src/main/res/drawable/launch_background.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+              <item android:drawable="@android:color/white" />
+          </layer-list>
+          EOF
+
+      - name: 🔍 Flutter Doctor
+        run: flutter doctor -v
+
+      - name: 🏗️ Build APK Release
+        run: flutter build apk --release
+
+      - name: ✅ List outputs
         run: ls -la build/app/outputs/flutter-apk/
 
-      - name: 📤 Upload APK Artifact
+      - name: 📤 Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Excel-Manager-APK
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30
-
-      - name: 🎉 Done!
-        run: echo "✅ APK Built Successfully!"
